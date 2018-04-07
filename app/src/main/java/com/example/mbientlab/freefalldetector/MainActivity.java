@@ -19,8 +19,12 @@ import com.mbientlab.metawear.Subscriber;
 import com.mbientlab.metawear.android.BtleService;
 import com.mbientlab.metawear.builder.RouteBuilder;
 import com.mbientlab.metawear.builder.RouteComponent;
+import com.mbientlab.metawear.builder.filter.Comparison;
+import com.mbientlab.metawear.builder.filter.ThresholdOutput;
+import com.mbientlab.metawear.builder.function.Function1;
 import com.mbientlab.metawear.data.Acceleration;
 import com.mbientlab.metawear.module.Accelerometer;
+import com.mbientlab.metawear.module.Logging;
 
 import bolts.Continuation;
 import bolts.Task;
@@ -30,6 +34,7 @@ public class MainActivity extends AppCompatActivity implements ServiceConnection
     private BtleService.LocalBinder serviceBinder;
     private MetaWearBoard board;
     private Accelerometer accelerometer;
+    private Logging logging;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,6 +48,8 @@ public class MainActivity extends AppCompatActivity implements ServiceConnection
         findViewById(R.id.start).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                Log.i("freefall", "start");
+                logging.start(false);
                 accelerometer.acceleration().start();
                 accelerometer.start();
             }
@@ -51,8 +58,29 @@ public class MainActivity extends AppCompatActivity implements ServiceConnection
         findViewById(R.id.stop).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                Log.i("freefall", "stop");
                 accelerometer.stop();
                 accelerometer.acceleration().stop();
+                logging.stop();
+                logging.downloadAsync().continueWith(new Continuation<Void, Void>() {
+                    @Override
+                    public Void then(Task<Void> task) throws Exception {
+                        if (task.isFaulted()){
+                            Log.i("frefall", "Log downloded failed, try again");
+
+                        } else {
+                            Log.i("freefall", "Log download complete");
+                        }
+                        return null;
+                    }
+                });
+            }
+        });
+
+        findViewById(R.id.reset).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                board.tearDown();
             }
         });
     }
@@ -91,20 +119,30 @@ public class MainActivity extends AppCompatActivity implements ServiceConnection
             public Task<Route> then(Task<Void> task) throws Exception {
                 Log.i("freefall", "Connected to" + macAddr);
 
+                logging = board.getModule(Logging.class);
                 accelerometer= board.getModule(Accelerometer.class);
                 accelerometer.configure()
-                        .odr(25f)       // Set sampling frequency to 25Hz, or closest valid ODR
+                        .odr(60f)       // Set sampling frequency to 25Hz, or closest valid ODR
                         .commit();
 
                 return accelerometer.acceleration().addRouteAsync(new RouteBuilder() {
                     @Override
                     public void configure(RouteComponent source) {
-                        source.stream(new Subscriber() {
-                            @Override
-                            public void apply(Data data, Object... env) {
-                                Log.i("freefall", data.value(Acceleration.class).toString());
-                            }
-                        });
+                        source.map(Function1.RSS).average((byte)4).filter(ThresholdOutput.BINARY,0.5f)
+                                .multicast()
+                                    .to().filter(Comparison.EQ, -1).log(new Subscriber() {
+                                        @Override
+                                        public void apply(Data data, Object... env) {
+                                            Log.i("freefall", data.formattedTimestamp() + ": in frefall");
+                                        }
+                                    })
+                                    .to().filter(Comparison.EQ, 1).log(new Subscriber() {
+                                        @Override
+                                        public void apply(Data data, Object... env) {
+                                            Log.i("freefall", data.formattedTimestamp() + ": no freefall");
+                                        }
+                                    })
+                                .end();
                     }
                 });
             }
